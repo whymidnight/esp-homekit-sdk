@@ -162,6 +162,7 @@ static void app_wac_sta_connect(wifi_config_t *wifi_cfg)
 static void event_handler(void* arg, esp_event_base_t event_base,
                           int event_id, void* event_data)
 {
+    ESP_LOGI(TAG, "Handling wifi event %d %d %d", event_id, IP_EVENT_STA_GOT_IP, WIFI_EVENT_STA_DISCONNECTED);
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -170,7 +171,18 @@ static void event_handler(void* arg, esp_event_base_t event_base,
         /* Signal main application to continue execution */
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_EVENT);
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGI(TAG, "Disconnected. Connecting to the AP again...");
+
+
+        wifi_event_sta_disconnected_t* dcEvent = (wifi_event_sta_disconnected_t*) event_data;
+        ESP_LOGI(TAG, "Disconnect caused by %s %s", (char *) &dcEvent->ssid, (char *) &dcEvent->reason);
+        if(WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT == dcEvent->reason || WIFI_REASON_AUTH_FAIL == dcEvent->reason)
+        {
+        ESP_LOGI(TAG,"Incorrect WiFi Credentials");
+        }
+
+
+
+
         esp_wifi_connect();
 #ifdef USE_UNIFIED_PROVISIONING
     } else if (event_base == WIFI_PROV_EVENT) {
@@ -264,11 +276,7 @@ esp_err_t app_wifi_start(TickType_t ticks_to_wait)
         .sta = {
             .ssid = APP_WIFI_SSID,
             .password = APP_WIFI_PASS,
-            /* Setting a password implies station will connect to all security modes including WEP/WPA.
-             * However these modes are deprecated and not advisable to be used. Incase your Access point
-             * doesn't support WPA2, these mode can be enabled by commenting below line */
-	     .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
             .pmf_cfg = {
                 .capable = true,
                 .required = false

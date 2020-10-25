@@ -30,7 +30,10 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_wifi.h>
 #include <esp_log.h>
+#include "driver/gpio.h"
+#include "hal/gpio_types.h"
 
 #include <hap_apple_servs.h>
 #include <hap_apple_chars.h>
@@ -40,13 +43,13 @@
 #include <app_wifi.h>
 #include <app_hap_setup_payload.h>
 
-static const char *TAG = "HAP Bridge";
+static const char *TAG = "Ritual Init";
 
 #define BRIDGE_TASK_PRIORITY  1
 #define BRIDGE_TASK_STACKSIZE 4 * 1024
 #define BRIDGE_TASK_NAME      "hap_bridge"
 
-#define NUM_BRIDGED_ACCESSORIES 3
+#define NUM_BRIDGED_ACCESSORIES 8
 
 /* Reset network credentials if button is pressed for more than 3 seconds and then released */
 #define RESET_NETWORK_BUTTON_TIMEOUT        3
@@ -109,29 +112,84 @@ static int accessory_identify(hap_acc_t *ha)
     return HAP_SUCCESS;
 }
 
-/* A dummy callback for handling a write on the "On" characteristic of Fan.
+/* A dummy callback for handling a write on the "On" characteristic of switch.
  * In an actual accessory, this should control the hardware
  */
-static int fan_on(bool value)
+static int switch_on(int gpio, bool value)
 {
-    ESP_LOGI(TAG, "Received Write. Fan %s", value ? "On" : "Off");
-    /* TODO: Control Actual Hardware */
+    ESP_LOGI(TAG, "Received Write. switch %s %d", value ? "On" : "Off", gpio);
+    gpio_set_level(gpio, value ? 1 : 0);
     return 0;
 }
 
-/* A dummy callback for handling a write on the "On" characteristic of Fan.
+/* A dummy callback for handling a write on the "On" characteristic of alternator.
  * In an actual accessory, this should control the hardware
  */
-static int fan_write(hap_write_data_t write_data[], int count,
+static int alternator_on(int gpio, bool value)
+{
+    ESP_LOGI(TAG, "Received Write. alternator %s, for %d", value ? "On" : "Off", gpio);
+    /*
+    gpio_set_level(gpio, value ? 1 : 0);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+    gpio_set_level(gpio, value ? 0 : 1);
+    */
+
+
+    if (value) {
+        gpio_set_level(gpio, value ? 1 : 0);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+        gpio_set_level(gpio, value ? 0 : 1);
+    }
+    return 0;
+}
+
+/* A dummy callback for handling a write on the "On" characteristic of switch.
+ * In an actual accessory, this should control the hardware
+ */
+static int switch_write(hap_write_data_t write_data[], int count,
         void *serv_priv, void *write_priv)
 {
-    ESP_LOGI(TAG, "Write called for Accessory %s", (char *)serv_priv);
     int i, ret = HAP_SUCCESS;
     hap_write_data_t *write;
     for (i = 0; i < count; i++) {
         write = &write_data[i];
         if (!strcmp(hap_char_get_type_uuid(write->hc), HAP_CHAR_UUID_ON)) {
-            fan_on(write->val.b);
+            char *name = (char *)serv_priv;
+            char *nameParsed;
+            char delim[3] = " ";
+            sprintf(delim, "%s", " ");
+            nameParsed = strtok(name, delim);
+            ESP_LOGI(TAG, "Write called for Accessory %s", name);
+            int gpio = atoi((char *) nameParsed);
+            switch_on(gpio, write->val.b);
+            hap_char_update_val(write->hc, &(write->val));
+            *(write->status) = HAP_STATUS_SUCCESS;
+        } else {
+            *(write->status) = HAP_STATUS_RES_ABSENT;
+        }
+    }
+    return ret;
+}
+
+/* A dummy callback for handling a write on the "On" characteristic of alternator.
+ * In an actual accessory, this should control the hardware
+ */
+static int alternator_write(hap_write_data_t write_data[], int count,
+        void *serv_priv, void *write_priv)
+{
+    int i, ret = HAP_SUCCESS;
+    hap_write_data_t *write;
+    for (i = 0; i < count; i++) {
+        write = &write_data[i];
+        if (!strcmp(hap_char_get_type_uuid(write->hc), HAP_CHAR_UUID_ON)) {
+            char *name = (char *)serv_priv;
+            char *nameParsed;
+            char delim[3] = " ";
+            sprintf(delim, "%s", " ");
+            nameParsed = strtok(name, delim);
+            ESP_LOGI(TAG, "Write called for Accessory %s", name);
+            int gpio = atoi((char *) nameParsed);
+            alternator_on(gpio, write->val.b);
             hap_char_update_val(write->hc, &(write->val));
             *(write->status) = HAP_STATUS_SUCCESS;
         } else {
@@ -147,12 +205,9 @@ static void bridge_thread_entry(void *p)
     hap_acc_t *accessory;
     hap_serv_t *service;
 
-    /* Initialize the HAP core */
+    ESP_LOGI(TAG, "init");
     hap_init(HAP_TRANSPORT_WIFI);
 
-    /* Initialise the mandatory parameters for Accessory which will be added as
-     * the mandatory services internally
-     */
     hap_acc_cfg_t cfg = {
         .name = "Esp-Bridge",
         .manufacturer = "Espressif",
@@ -164,53 +219,71 @@ static void bridge_thread_entry(void *p)
         .identify_routine = bridge_identify,
         .cid = HAP_CID_BRIDGE,
     };
-    /* Create accessory object */
     accessory = hap_acc_create(&cfg);
 
-    /* Add a dummy Product Data */
     uint8_t product_data[] = {'E','S','P','3','2','H','A','P'};
     hap_acc_add_product_data(accessory, product_data, sizeof(product_data));
 
-    /* Add the Accessory to the HomeKit Database */
     hap_add_accessory(accessory);
 
-    /* Create and add the Accessory to the Bridge object*/
+    uint8_t gpios[] = {32,33,25,15,17,22,12,13};
     for (uint8_t i = 0; i < NUM_BRIDGED_ACCESSORIES; i++) {
-        char accessory_name[12] = {0};
-        sprintf(accessory_name, "ESP-Fan-%d", i);
+        ESP_LOGI(TAG, "init acc %d", i);
+        uint8_t gpio = 0;
+        char accessory_name[25] = {0};
+        if ((i % 2) == 1) {
+            gpio = gpios[i];
+            sprintf(accessory_name, "%d-Light-Altr", gpio);
+            // service = hap_serv_stateless_programmable_switch_create(0);
+            service = hap_serv_switch_create(false);
+            hap_serv_set_write_cb(service, alternator_write);
+            gpio_reset_pin(gpio);
+            gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
 
-        hap_acc_cfg_t bridge_cfg = {
-            .name = accessory_name,
-            .manufacturer = "Espressif",
-            .model = "EspFan01",
-            .serial_num = "abcdefg",
-            .fw_rev = "0.9.0",
-            .hw_rev = NULL,
-            .pv = "1.1.0",
-            .identify_routine = accessory_identify,
-            .cid = HAP_CID_BRIDGE,
-        };
-        /* Create accessory object */
-        accessory = hap_acc_create(&bridge_cfg);
+            hap_acc_cfg_t bridge_cfg = {
+                .name = accessory_name,
+                .manufacturer = "Espressif",
+                .model = "EspAlt01",
+                .serial_num = "abcdefg",
+                .fw_rev = "0.9.0",
+                .hw_rev = NULL,
+                .pv = "1.1.0",
+                .identify_routine = accessory_identify,
+                .cid = HAP_CID_BRIDGE,
+            };
+            accessory = hap_acc_create(&bridge_cfg);
+            hap_serv_add_char(service, hap_char_name_create(accessory_name));
+            hap_serv_set_priv(service, strdup(accessory_name));
+            hap_acc_add_serv(accessory, service);
+            hap_add_bridged_accessory(accessory, hap_get_unique_aid(accessory_name));
+        }
+        if ((i % 2) == 0) {
+            gpio = gpios[i];
+            sprintf(accessory_name, "%d-Light-Bulb", gpio);
+            service = hap_serv_lightbulb_create(false);
+            hap_serv_set_write_cb(service, switch_write);
+            gpio_reset_pin(gpio);
+            gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
 
-        /* Create the Fan Service. Include the "name" since this is a user visible service  */
-        service = hap_serv_fan_create(false);
-        hap_serv_add_char(service, hap_char_name_create(accessory_name));
-
-        /* Set the Accessory name as the Private data for the service,
-         * so that the correct accessory can be identified in the
-         * write callback
-         */
-        hap_serv_set_priv(service, strdup(accessory_name));
-
-        /* Set the write callback for the service */
-        hap_serv_set_write_cb(service, fan_write);
- 
-        /* Add the Fan Service to the Accessory Object */
-        hap_acc_add_serv(accessory, service);
-
-        /* Add the Accessory to the HomeKit Database */
-        hap_add_bridged_accessory(accessory, hap_get_unique_aid(accessory_name));
+            hap_acc_cfg_t bridge_cfg = {
+                .name = accessory_name,
+                .manufacturer = "Espressif",
+                .model = "EspFan01",
+                .serial_num = "abcdefg",
+                .fw_rev = "0.9.0",
+                .hw_rev = NULL,
+                .pv = "1.1.0",
+                .identify_routine = accessory_identify,
+                .cid = HAP_CID_BRIDGE,
+            };
+            accessory = hap_acc_create(&bridge_cfg);
+            hap_serv_add_char(service, hap_char_name_create(accessory_name));
+            hap_serv_set_priv(service, strdup(accessory_name));
+            hap_acc_add_serv(accessory, service);
+            hap_add_bridged_accessory(accessory, hap_get_unique_aid(accessory_name));
+        }
+        /*
+        */
     }
 
     /* Register a common button for reset Wi-Fi network and reset to factory.
@@ -241,7 +314,6 @@ static void bridge_thread_entry(void *p)
 #endif
 
     /* Enable Hardware MFi authentication (applicable only for MFi variant of SDK) */
-    hap_enable_mfi_auth(HAP_MFI_AUTH_HW);
 
     /* Initialize Wi-Fi */
     app_wifi_init();
@@ -256,6 +328,7 @@ static void bridge_thread_entry(void *p)
 
 void app_main()
 {
+    esp_wifi_set_protocol( WIFI_IF_AP, WIFI_PROTOCOL_LR );
+    esp_wifi_set_protocol( WIFI_IF_STA, WIFI_PROTOCOL_LR );
     xTaskCreate(bridge_thread_entry, BRIDGE_TASK_NAME, BRIDGE_TASK_STACKSIZE, NULL, BRIDGE_TASK_PRIORITY, NULL);
 }
-
